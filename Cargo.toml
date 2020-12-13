@@ -1,0 +1,39 @@
+[package]
+name = "vsts"
+version = "0.0.1"
+authors = ["DGriffin91"]
+
+description = "Some vst plugin experiments"
+
+readme = "README.md"
+
+license = "MIT"
+keywords = ["vst", "vst2", "plugin"]
+
+autoexamples = false
+
+[dependencies]
+vst = "0.2.1"
+time = "0.2.23"
+
+
+[[example]]
+name = "sine_synth"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "gain_effect"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "multi_synth"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "saturate"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "compressor"
+crate-type = ["cdylib"]
+
