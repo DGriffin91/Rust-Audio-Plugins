@@ -37,3 +37,6 @@ crate-type = ["cdylib"]
 name = "compressor"
 crate-type = ["cdylib"]
 
+[[example]]
+name = "slew"
+crate-type = ["cdylib"]
