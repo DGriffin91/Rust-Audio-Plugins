@@ -10,11 +10,11 @@ use vst::util::AtomicFloat;
 use std::sync::Arc;
 
 fn gain_from_db(decibels: f32) -> f32 {
-    (10.0f32).powf(decibels * 0.05).max(0.0)
+    (10.0f32).powf(decibels * 0.05)
 }
 
 fn db_from_gain(gain: f32) -> f32 {
-    (gain.log(10.0) * 20.0).max(0.0)
+    gain.max(0.0).log(10.0) * 20.0
 }
 
 /// Simple Gain Effect.
@@ -26,7 +26,7 @@ struct GainEffect {
     // Store a handle to the plugin's parameter object.
     params: Arc<GainEffectParameters>,
     sample_rate: f32,
-    prev: f32,
+    prev_env: f32,
 }
 
 /// The plugin's parameter object contains the values of parameters that can be
@@ -55,7 +55,7 @@ impl Default for GainEffect {
         GainEffect {
             params: Arc::new(GainEffectParameters::default()),
             sample_rate: 44100.0,
-            prev: 0.0,
+            prev_env: 0.0,
         }
     }
 }
@@ -105,8 +105,8 @@ impl Plugin for GainEffect {
         let gain = gain_from_db(self.params.gain.get() * 100.0);
 
         let thrlin = gain_from_db(threshold);
-        let cte_a_t = (-2.0 * PI * 1000.0 / attack / self.sample_rate).exp();
-        let cte_r_l = (-2.0 * PI * 1000.0 / release / self.sample_rate).exp();
+        let cte_attack = (-2.0 * PI * 1000.0 / attack / self.sample_rate).exp();
+        let cte_release = (-2.0 * PI * 1000.0 / release / self.sample_rate).exp();
 
         let (inputs, mut outputs) = buffer.split();
         let (inputs_left, inputs_right) = inputs.split_at(1);
@@ -119,16 +119,16 @@ impl Plugin for GainEffect {
             let (input_l, input_r) = input_pair;
             let (output_l, output_r) = output_pair;
 
-            let side_input = (input_l + input_r).abs() * 0.5;
+            let detector_input = (input_l + input_r).abs() * 0.5;
 
             // Ballistics filter and envelope generation
-            let cte = if side_input >= self.prev {
-                cte_a_t
+            let cte = if detector_input >= self.prev_env {
+                cte_attack
             } else {
-                cte_r_l
+                cte_release
             };
-            let env = side_input + cte * (self.prev - side_input);
-            self.prev = env;
+            let env = detector_input + cte * (self.prev_env - detector_input);
+            self.prev_env = env;
 
             // Compressor transfer function
             let cv = if env <= thrlin {

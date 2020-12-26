@@ -40,3 +40,11 @@ crate-type = ["cdylib"]
 [[example]]
 name = "slew"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "reverb"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "test_plugin"
+crate-type = ["cdylib"]
