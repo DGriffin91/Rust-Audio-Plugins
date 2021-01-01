@@ -403,23 +403,6 @@ impl Plugin for SamplerSynth {
                     None => Err("Could not access producer"),
                 };
             }
-
-        //let exhausted = true;
-        //while n < samples {
-        //    match &mut self.source_signal {
-        //        Some(s) => Ok({
-        //            let exhausted = s.is_exhausted();
-        //            if !exhausted {
-        //                self.current_samples_out[n] = s.next();
-        //                n += 1;
-        //            }
-        //        }),
-        //        None => Err("Could not access source_signal"),
-        //    };
-        //    if exhausted {
-        //        self.process_sample(amplitude, 0);
-        //    }
-        //}
         } else {
             for sample_idx in 0..count {
                 self.process_sample(amplitude, sample_idx)
@@ -476,7 +459,14 @@ impl Plugin for SamplerSynth {
     fn set_block_size(&mut self, size: i64) {
         let sinc = Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE]));
 
-        let (source_signal, producer) = RingBufferSignal::new(512);
+        self.from_size =
+            (size as f32 * (BASE_SAMPLE_RATE as f32 / self.sample_rate as f32)) as usize;
+        self.block_size = size as usize;
+
+        self.current_samples = vec![0.0; self.from_size as usize];
+        self.current_samples_out = vec![0.0; size as usize];
+
+        let (source_signal, producer) = RingBufferSignal::new((self.from_size + 1) as usize);
 
         let source_signal =
             source_signal.from_hz_to_hz(sinc, BASE_SAMPLE_RATE as f64, self.sample_rate as f64);
@@ -484,13 +474,6 @@ impl Plugin for SamplerSynth {
         self.source_signal = Some(source_signal);
 
         self.source_producer = Some(producer);
-
-        self.from_size =
-            (size as f32 * (BASE_SAMPLE_RATE as f32 / self.sample_rate as f32)) as usize;
-        self.block_size = size as usize;
-
-        self.current_samples = vec![0.0; self.from_size as usize];
-        self.current_samples_out = vec![0.0; size as usize];
     }
 }
 
