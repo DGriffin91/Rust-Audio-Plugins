@@ -82,7 +82,7 @@ fn load_wav(path: &str) -> Vec<f32> {
 
 const POLY: usize = 3;
 const BASE_SAMPLE_RATE: i32 = 44100;
-const SINC_INTERPOLATOR_SIZE: usize = 8;
+const SINC_INTERPOLATOR_SIZE: usize = 24;
 
 struct RingBufferSignal {
     consumer: Consumer<f32>,
@@ -124,6 +124,7 @@ struct SamplerSynth {
     source_producer: Option<Producer<f32>>,
     from_size: usize,
     block_size: usize,
+    time_per_sample: f64,
 }
 
 /// The plugin's parameter object contains the values of parameters that can be
@@ -158,6 +159,7 @@ impl Default for SamplerSynth {
             source_producer: None,
             from_size: 64,
             block_size: 64,
+            time_per_sample: 44100.0 / 1.0,
         }
     }
 }
@@ -198,10 +200,6 @@ impl Default for Note {
 }
 
 impl SamplerSynth {
-    fn time_per_sample(&self) -> f64 {
-        1.0 / self.sample_rate
-    }
-
     /// Process an incoming midi event.
     ///
     /// The midi data is split up like so:
@@ -245,6 +243,46 @@ impl SamplerSynth {
             }
         }
     }
+
+    fn process_sample(&mut self, amplitude: f32, sample_idx: usize) {
+        let mut output_sample = 0.0;
+        for plevel in 0..POLY {
+            for note_value in 0..64usize {
+                let note = &mut self.notes[plevel][note_value];
+                match note.state {
+                    NoteState::ON | NoteState::OFF => {
+                        if note_value == 1 {
+                            output_sample = 1.0;
+                            note.state = NoteState::OFF;
+                        }
+
+                        //We need to play the sound all the way through, even if it's off
+                        if note.sample >= self.audio_data[note_value].len() {
+                            *note = Note::default();
+                            continue;
+                        }
+
+                        output_sample += self.audio_data[note_value][note.sample] * note.level;
+
+                        note.time += self.time_per_sample;
+                        note.sample += 1;
+                    }
+                    NoteState::NONE => {}
+                }
+            }
+        }
+
+        if self.sample_rate as i32 != BASE_SAMPLE_RATE {
+            match &mut self.source_producer {
+                Some(s) => Ok(s.push(output_sample * amplitude)),
+                None => Err("Could not access producer"),
+            };
+        } else {
+            self.current_samples[sample_idx] = output_sample * amplitude;
+        }
+
+        self.time += self.time_per_sample;
+    }
 }
 
 fn start_file_load_thread(mut producer: Producer<WavData>) {
@@ -273,6 +311,12 @@ fn start_file_load_thread(mut producer: Producer<WavData>) {
             .push(WavData {
                 audio: load_wav("C:/dev/vst/dgriffin/assets/rack.wav"),
                 note: 43,
+            })
+            .unwrap();
+        producer
+            .push(WavData {
+                audio: load_wav("C:/dev/vst/dgriffin/assets/sweep.wav"),
+                note: 2,
             })
             .unwrap();
 
@@ -334,52 +378,52 @@ impl Plugin for SamplerSynth {
         let samples = buffer.samples();
         let (_, mut outputs) = buffer.split();
         let output_count = outputs.len();
-        let per_sample = self.time_per_sample();
-        let mut output_sample;
         let mut count = self.from_size;
         if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-            count = (count as f64 * 1.05) as usize;
+            count = (count as f64 * 1.1) as usize;
         }
-        for sample_idx in 0..count {
-            output_sample = 0.0;
-            for plevel in 0..POLY {
-                for note_value in 0..64usize {
-                    let note = &mut self.notes[plevel][note_value];
-                    match note.state {
-                        NoteState::ON | NoteState::OFF => {
-                            //We need to play the sound all the way through, even if it's off
-                            if note.sample >= self.audio_data[note_value].len() {
-                                *note = Note::default();
-                                continue;
-                            }
 
-                            output_sample += self.audio_data[note_value][note.sample] * note.level;
-
-                            note.time += per_sample;
-                            note.sample += 1;
+        //let mut n = 0;
+        if self.sample_rate as i32 != BASE_SAMPLE_RATE {
+            for sample_idx in 0..count {
+                match &mut self.source_producer {
+                    Some(s) => Ok({
+                        if s.is_full() {
+                            break;
                         }
-                        NoteState::NONE => {}
-                    }
-                }
+                    }),
+                    None => Err("Could not access source_signal"),
+                };
+                self.process_sample(amplitude, sample_idx);
             }
 
-            if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-                match &mut self.source_producer {
-                    Some(s) => Ok(s.push(output_sample * amplitude)),
+            for i in 0..samples {
+                match &mut self.source_signal {
+                    Some(s) => Ok(self.current_samples_out[i] = s.next()),
                     None => Err("Could not access producer"),
                 };
-            } else {
-                self.current_samples[sample_idx] = output_sample * amplitude;
             }
 
-            self.time += per_sample;
-        }
-
-        for i in 0..samples {
-            match &mut self.source_signal {
-                Some(s) => Ok(self.current_samples_out[i] = s.next()),
-                None => Err("Could not access producer"),
-            };
+        //let exhausted = true;
+        //while n < samples {
+        //    match &mut self.source_signal {
+        //        Some(s) => Ok({
+        //            let exhausted = s.is_exhausted();
+        //            if !exhausted {
+        //                self.current_samples_out[n] = s.next();
+        //                n += 1;
+        //            }
+        //        }),
+        //        None => Err("Could not access source_signal"),
+        //    };
+        //    if exhausted {
+        //        self.process_sample(amplitude, 0);
+        //    }
+        //}
+        } else {
+            for sample_idx in 0..count {
+                self.process_sample(amplitude, sample_idx)
+            }
         }
 
         if self.sample_rate as i32 != BASE_SAMPLE_RATE {
@@ -426,6 +470,7 @@ impl Plugin for SamplerSynth {
 
     fn set_sample_rate(&mut self, rate: f32) {
         self.sample_rate = rate as f64;
+        self.time_per_sample = (1.0 / self.sample_rate) as f64;
     }
 
     fn set_block_size(&mut self, size: i64) {
