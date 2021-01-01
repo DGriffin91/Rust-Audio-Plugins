@@ -17,6 +17,21 @@ vst = "0.2.1"
 time = "0.2.23"
 
 
+[dev-dependencies]
+
+dasp = {git = "https://github.com/ollpu/dasp", branch = "master", features = ["all"]}
+
+find_folder = "0.3"
+hound = "3"
+
+log = "0.4"
+log-panics = "2"
+simplelog = "0.8"
+dirs = "3"
+ringbuf = "0.2"
+
+dsp-util = {git = "https://github.com/DGriffin91/rust-dsp-util", branch = "main"}
+
 [[example]]
 name = "sine_synth"
 crate-type = ["cdylib"]
@@ -47,4 +62,8 @@ crate-type = ["cdylib"]
 
 [[example]]
 name = "test_plugin"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "wav_sampler"
 crate-type = ["cdylib"]
