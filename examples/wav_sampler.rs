@@ -104,6 +104,54 @@ impl Signal for RingBufferSignal {
     }
 }
 
+struct SampleRateConverter {
+    source_signal: Converter<
+        Converter<RingBufferSignal, Sinc<[f32; SINC_INTERPOLATOR_SIZE]>>,
+        Sinc<[f32; SINC_INTERPOLATOR_SIZE]>,
+    >,
+    source_producer: Producer<f32>,
+    source_hz: f64,
+    target_hz: f64,
+    source_buffer_size: usize,
+    target_buffer_size: usize,
+}
+
+impl SampleRateConverter {
+    fn new(source_hz: f64, target_hz: f64, target_buffer_size: usize) -> SampleRateConverter {
+        let source_buffer_size = (target_buffer_size as f64 * (source_hz / target_hz)) as usize;
+
+        let (signal, source_producer) = RingBufferSignal::new((source_buffer_size + 1) as usize);
+
+        let source_signal = signal.from_hz_to_hz(
+            Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE])),
+            source_hz,
+            target_hz * 2.0,
+        );
+        let source_signal = source_signal.from_hz_to_hz(
+            Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE])),
+            target_hz * 2.0,
+            target_hz,
+        );
+
+        SampleRateConverter {
+            source_signal,
+            source_producer,
+            source_hz,
+            target_hz,
+            source_buffer_size,
+            target_buffer_size,
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.source_producer.push(sample);
+    }
+
+    fn pop(&mut self) -> f32 {
+        self.source_signal.next()
+    }
+}
+
 /// Simple Gain Effect.
 /// Note that this does not use a proper scale for sound and shouldn't be used in
 /// a production amplification effect!  This is purely for demonstration purposes,
@@ -112,18 +160,14 @@ impl Signal for RingBufferSignal {
 struct SamplerSynth {
     // Store a handle to the plugin's parameter object.
     params: Arc<SamplerSynthParameters>,
-    audio_data: Vec<Vec<f32>>,
-    audio_data_consumer: Option<Consumer<WavData>>,
+    wav_data: Vec<Vec<f32>>,
+    wav_data_consumer: Option<Consumer<WavData>>,
 
     sample_rate: f64,
     time: f64,
     notes: [[Note; 64]; POLY],
-    current_samples: Vec<f32>,
-    current_samples_out: Vec<f32>,
-    source_signal: Option<Converter<RingBufferSignal, Sinc<[f32; SINC_INTERPOLATOR_SIZE]>>>,
-    source_producer: Option<Producer<f32>>,
-    from_size: usize,
-    block_size: usize,
+    samples_out: Vec<f32>,
+    sample_rate_converter: SampleRateConverter,
     time_per_sample: f64,
 }
 
@@ -148,17 +192,13 @@ impl Default for SamplerSynth {
     fn default() -> SamplerSynth {
         SamplerSynth {
             params: Arc::new(SamplerSynthParameters::default()),
-            audio_data: vec![Vec::new(); 64],
-            audio_data_consumer: None,
+            wav_data: vec![Vec::new(); 64],
+            wav_data_consumer: None,
             sample_rate: 44100.0,
             time: 0.0,
             notes: [[Note::default(); 64]; POLY],
-            current_samples: Vec::new(),
-            current_samples_out: Vec::new(),
-            source_signal: None,
-            source_producer: None,
-            from_size: 64,
-            block_size: 64,
+            samples_out: Vec::new(),
+            sample_rate_converter: SampleRateConverter::new(44100.0, 44100.0, 64),
             time_per_sample: 44100.0 / 1.0,
         }
     }
@@ -244,7 +284,7 @@ impl SamplerSynth {
         }
     }
 
-    fn process_sample(&mut self, amplitude: f32, sample_idx: usize) {
+    fn process_sample(&mut self) -> f32 {
         let mut output_sample = 0.0;
         for plevel in 0..POLY {
             for note_value in 0..64usize {
@@ -257,12 +297,12 @@ impl SamplerSynth {
                         }
 
                         //We need to play the sound all the way through, even if it's off
-                        if note.sample >= self.audio_data[note_value].len() {
+                        if note.sample >= self.wav_data[note_value].len() {
                             *note = Note::default();
                             continue;
                         }
 
-                        output_sample += self.audio_data[note_value][note.sample] * note.level;
+                        output_sample += self.wav_data[note_value][note.sample] * note.level;
 
                         note.time += self.time_per_sample;
                         note.sample += 1;
@@ -272,16 +312,26 @@ impl SamplerSynth {
             }
         }
 
-        if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-            match &mut self.source_producer {
-                Some(s) => Ok(s.push(output_sample * amplitude)),
-                None => Err("Could not access producer"),
-            };
-        } else {
-            self.current_samples[sample_idx] = output_sample * amplitude;
-        }
+        output_sample
+    }
 
-        self.time += self.time_per_sample;
+    fn handle_wav_loading(&mut self) {
+        if let Some(ref mut consumer) = self.wav_data_consumer {
+            for _ in 0..consumer.len() {
+                if let Some(wav_data) = consumer.pop() {
+                    self.wav_data[wav_data.note] = wav_data.audio;
+                } else {
+                    break;
+                }
+            }
+        } else {
+            let wav_data_ring = RingBuffer::<WavData>::new(64);
+
+            let (wav_data_producer, wav_data_consumer) = wav_data_ring.split();
+            self.wav_data_consumer = Some(wav_data_consumer);
+
+            start_file_load_thread(wav_data_producer);
+        }
     }
 }
 
@@ -353,75 +403,34 @@ impl Plugin for SamplerSynth {
 
     // Here is where the bulk of our audio processing code goes.
     fn process(&mut self, buffer: &mut AudioBuffer<f32>) {
-        if let Some(ref mut consumer) = self.audio_data_consumer {
-            for _ in 0..consumer.len() {
-                if let Some(wav_data) = consumer.pop() {
-                    self.audio_data[wav_data.note] = wav_data.audio;
-                } else {
-                    break;
-                }
-            }
-        } else {
-            let audio_data_ring = RingBuffer::<WavData>::new(64);
+        self.handle_wav_loading();
 
-            let (audio_data_producer, audio_data_consumer) = audio_data_ring.split();
-            self.audio_data_consumer = Some(audio_data_consumer);
-
-            start_file_load_thread(audio_data_producer);
-        }
-
-        // Read the amplitude from the parameter object
         let amplitude = self.params.amplitude.get();
-        // First, we destructure our audio buffer into an arbitrary number of
-        // input and output buffers.  Usually, we'll be dealing with stereo (2 of each)
-        // but that might change.
+
         let samples = buffer.samples();
         let (_, mut outputs) = buffer.split();
-        let output_count = outputs.len();
-        let mut count = self.from_size;
-        if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-            count = (count as f64 * 1.1) as usize;
-        }
 
-        //let mut n = 0;
         if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-            for sample_idx in 0..count {
-                match &mut self.source_producer {
-                    Some(s) => Ok({
-                        if s.is_full() {
-                            break;
-                        }
-                    }),
-                    None => Err("Could not access source_signal"),
-                };
-                self.process_sample(amplitude, sample_idx);
+            while !self.sample_rate_converter.source_producer.is_full() {
+                let sample = self.process_sample();
+                self.sample_rate_converter.push(sample * amplitude);
             }
 
             for i in 0..samples {
-                match &mut self.source_signal {
-                    Some(s) => Ok(self.current_samples_out[i] = s.next()),
-                    None => Err("Could not access producer"),
-                };
+                self.samples_out[i] = self.sample_rate_converter.pop();
             }
         } else {
-            for sample_idx in 0..count {
-                self.process_sample(amplitude, sample_idx)
+            //No need for sample rate conversion
+            for sample_idx in 0..self.sample_rate_converter.source_buffer_size {
+                let sample = self.process_sample();
+                self.samples_out[sample_idx] = sample * amplitude
             }
         }
 
-        if self.sample_rate as i32 != BASE_SAMPLE_RATE {
-            for i in 0..samples {
-                for buf_idx in 0..output_count {
-                    let buff = outputs.get_mut(buf_idx);
-                    buff[i] = self.current_samples_out[i];
-                }
-            }
-        } else {
-            for i in 0..samples {
-                for buf_idx in 0..output_count {
-                    let buff = outputs.get_mut(buf_idx);
-                    buff[i] = self.current_samples[i];
-                }
+        for i in 0..samples {
+            for buf_idx in 0..outputs.len() {
+                let buff = outputs.get_mut(buf_idx);
+                buff[i] = self.samples_out[i];
             }
         }
     }
@@ -457,23 +466,10 @@ impl Plugin for SamplerSynth {
     }
 
     fn set_block_size(&mut self, size: i64) {
-        let sinc = Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE]));
+        self.sample_rate_converter =
+            SampleRateConverter::new(BASE_SAMPLE_RATE as f64, self.sample_rate, size as usize);
 
-        self.from_size =
-            (size as f32 * (BASE_SAMPLE_RATE as f32 / self.sample_rate as f32)) as usize;
-        self.block_size = size as usize;
-
-        self.current_samples = vec![0.0; self.from_size as usize];
-        self.current_samples_out = vec![0.0; size as usize];
-
-        let (source_signal, producer) = RingBufferSignal::new((self.from_size + 1) as usize);
-
-        let source_signal =
-            source_signal.from_hz_to_hz(sinc, BASE_SAMPLE_RATE as f64, self.sample_rate as f64);
-
-        self.source_signal = Some(source_signal);
-
-        self.source_producer = Some(producer);
+        self.samples_out = vec![0.0; self.sample_rate_converter.target_buffer_size as usize];
     }
 }
 
