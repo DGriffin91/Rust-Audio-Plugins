@@ -19,19 +19,14 @@ use vst::event::Event;
 use vst::plugin::{CanDo, Category, Info, Plugin, PluginParameters};
 use vst::util::AtomicFloat;
 
-use std::{
-    sync::{Arc, Mutex},
-    thread::JoinHandle,
-};
+use std::sync::Arc;
 
 use ringbuf::{Consumer, Producer, RingBuffer};
 
+use dasp::signal::interpolate::Converter;
 use dasp::{interpolate::sinc::Sinc, ring_buffer, signal, Signal};
-use dasp::{signal::interpolate::Converter, signal::GenMut, slice::ToFrameSliceMut};
 
 use std::thread;
-
-use std::env;
 
 fn setup_logging(path: &str) {
     let log_folder = ::dirs::home_dir().unwrap().join("tmp");
@@ -105,10 +100,7 @@ impl Signal for RingBufferSignal {
 }
 
 struct SampleRateConverter {
-    source_signal: Converter<
-        Converter<RingBufferSignal, Sinc<[f32; SINC_INTERPOLATOR_SIZE]>>,
-        Sinc<[f32; SINC_INTERPOLATOR_SIZE]>,
-    >,
+    source_signal: Converter<RingBufferSignal, Sinc<[f32; SINC_INTERPOLATOR_SIZE]>>,
     source_producer: Producer<f32>,
     source_hz: f64,
     target_hz: f64,
@@ -125,13 +117,14 @@ impl SampleRateConverter {
         let source_signal = signal.from_hz_to_hz(
             Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE])),
             source_hz,
-            target_hz * 2.0,
-        );
-        let source_signal = source_signal.from_hz_to_hz(
-            Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE])),
-            target_hz * 2.0,
             target_hz,
         );
+
+        //let source_signal = source_signal.from_hz_to_hz(
+        //    Sinc::new(ring_buffer::Fixed::from([0.0f32; SINC_INTERPOLATOR_SIZE])),
+        //    target_hz * 2.0,
+        //    target_hz,
+        //);
 
         SampleRateConverter {
             source_signal,
@@ -164,7 +157,6 @@ struct SamplerSynth {
     wav_data_consumer: Option<Consumer<WavData>>,
 
     sample_rate: f64,
-    time: f64,
     notes: [[Note; 64]; POLY],
     samples_out: Vec<f32>,
     sample_rate_converter: SampleRateConverter,
@@ -195,7 +187,6 @@ impl Default for SamplerSynth {
             wav_data: vec![Vec::new(); 64],
             wav_data_consumer: None,
             sample_rate: 44100.0,
-            time: 0.0,
             notes: [[Note::default(); 64]; POLY],
             samples_out: Vec::new(),
             sample_rate_converter: SampleRateConverter::new(44100.0, 44100.0, 64),
@@ -222,7 +213,6 @@ enum NoteState {
 struct Note {
     sample: usize,
     time: f64,
-    off_time: f64,
     level: f32,
     state: NoteState,
 }
@@ -232,7 +222,6 @@ impl Default for Note {
         Note {
             sample: 0,
             time: 0.0,
-            off_time: 0.0,
             level: 0.0,
             state: NoteState::NONE,
         }
@@ -265,7 +254,6 @@ impl SamplerSynth {
                 self.notes[plevel][note] = Note {
                     sample: 0,
                     time: 0.0,
-                    off_time: 0.0,
                     level: (level as f32) / 255.0,
                     state: NoteState::ON,
                 };
